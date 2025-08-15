@@ -472,7 +472,7 @@ output "deployment_summary" {
     "🗄️  Database"            = "${google_sql_database_instance.wiki_postgres.name} (${google_sql_database_instance.wiki_postgres.public_ip_address})"
     "📦 Image Registry"       = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.wiki_js_repo.repository_id}"
     "🔑 Service Account"      = google_service_account.wiki_js_sa.email
-    "🏗️  Build Trigger"       = google_cloudbuild_trigger.wiki_js_image_builder.name
+    "🏗️  Build Method"        = "Cloud Build via terraform_data"
   }
 }
 
