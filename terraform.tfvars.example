@@ -1,0 +1,22 @@
+# =============================================================================
+# Terraform Variables Configuration
+# 
+# Copy this file to terraform.tfvars and update the values
+# or provide values via command line: terraform apply -var="project_id=my-project"
+# =============================================================================
+
+# REQUIRED: Your Google Cloud Project ID
+project_id = "your-gcp-project-id-here"
+
+# OPTIONAL: Google Cloud Region (default: us-central1)
+# region = "us-central1"
+
+# OPTIONAL: Google Cloud Zone (default: us-central1-a)  
+# zone = "us-central1-a"
+
+# =============================================================================
+# Examples:
+# project_id = "my-wiki-project-123456"
+# region     = "europe-west1"
+# zone       = "europe-west1-b"
+# =============================================================================
