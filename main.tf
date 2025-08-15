@@ -1,7 +1,7 @@
 # =============================================================================
 # Wiki.js on Google Cloud Run - Complete Terraform Deployment
 # Repository: https://github.com/Comeon2022/wikijstf.git
-# Version: 1.0.0
+# Version: 1.0.1
 # Last Updated: 2025-08-15
 # 
 # Usage:
@@ -253,291 +253,43 @@ resource "google_sql_user" "wiki_user" {
 }
 
 # =============================================================================
-# STEP 6: CLOUD BUILD FOR DOCKER IMAGE
-# =============================================================================
-
-# =============================================================================
 # STEP 6: BUILD AND PUSH DOCKER IMAGE USING CLOUD BUILD
 # =============================================================================
 
-# Execute Cloud Build to pull and push Wiki.js image
-resource "terraform_data" "build_and_push_image" {
-  triggers_replace = [
-    google_artifact_registry_repository.wiki_js_repo.name
-  ]
+# Simple approach: Use local-exec to handle image push
+resource "null_resource" "build_and_push_image" {
+  triggers = {
+    registry_url = google_artifact_registry_repository.wiki_js_repo.name
+  }
   
   provisioner "local-exec" {
     command = <<-EOT
       echo "🚀 Starting Wiki.js image build and push process..."
       
-      # Create a temporary build configuration
-      cat > /tmp/cloudbuild.yaml << 'EOF'
-steps:
-  # Pull the official Wiki.js image
-  - name: 'gcr.io/cloud-builders/docker'
-    args: ['pull', 'ghcr.io/requarks/wiki:2']
-    
-  # Tag for Artifact Registry
-  - name: 'gcr.io/cloud-builders/docker'
-    args: 
-      - 'tag'
-      - 'ghcr.io/requarks/wiki:2'
-      - '${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.wiki_js_repo.repository_id}/wiki:2'
+      # Configure Docker authentication
+      gcloud auth configure-docker ${var.region}-docker.pkg.dev --quiet
       
-  # Tag as latest
-  - name: 'gcr.io/cloud-builders/docker'
-    args:
-      - 'tag' 
-      - 'ghcr.io/requarks/wiki:2'
-      - '${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.wiki_js_repo.repository_id}/wiki:latest'
+      # Pull the official Wiki.js image
+      echo "📦 Pulling official Wiki.js image..."
+      docker pull ghcr.io/requarks/wiki:2
       
-  # Push version 2
-  - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', '${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.wiki_js_repo.repository_id}/wiki:2']
-    
-  # Push latest
-  - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', '${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.wiki_js_repo.repository_id}/wiki:latest']
-
-options:
-  logging: CLOUD_LOGGING_ONLY
-timeout: '600s'
-serviceAccount: '${google_service_account.cloudbuild_sa.email}'
-EOF
+      # Tag for Artifact Registry
+      echo "🏷️ Tagging image for Artifact Registry..."
+      docker tag ghcr.io/requarks/wiki:2 ${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.wiki_js_repo.repository_id}/wiki:2
+      docker tag ghcr.io/requarks/wiki:2 ${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.wiki_js_repo.repository_id}/wiki:latest
       
-      echo "📦 Submitting build job to Cloud Build..."
+      # Push to Artifact Registry
+      echo "⬆️ Pushing images to Artifact Registry..."
+      docker push ${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.wiki_js_repo.repository_id}/wiki:2
+      docker push ${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.wiki_js_repo.repository_id}/wiki:latest
       
-      # Submit the build and capture the build ID properly
-      BUILD_OUTPUT=$(gcloud builds submit --config=/tmp/cloudbuild.yaml \
-        --no-source \
-        --project=${var.project_id} \
-        --format="value(id)" 2>&1)
-      
-      # Extract build ID from output
-      BUILD_ID=$(echo "$BUILD_OUTPUT" | grep -E '^[a-f0-9-]{36}
-
-# =============================================================================
-# STEP 7: DEPLOY CLOUD RUN SERVICE
-# =============================================================================
-
-resource "google_cloud_run_v2_service" "wiki_js" {
-  name     = "wiki-js"
-  location = var.region
-  
-  template {
-    service_account = google_service_account.wiki_js_sa.email
-    
-    containers {
-      image = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.wiki_js_repo.repository_id}/wiki:2"
-      
-      ports {
-        container_port = 3000
-      }
-      
-      # Environment variables for Wiki.js
-      env {
-        name  = "DB_TYPE"
-        value = "postgres"
-      }
-      
-      env {
-        name  = "DB_HOST"
-        value = google_sql_database_instance.wiki_postgres.public_ip_address
-      }
-      
-      env {
-        name  = "DB_PORT"
-        value = "5432"
-      }
-      
-      env {
-        name  = "DB_USER"
-        value = google_sql_user.wiki_user.name
-      }
-      
-      env {
-        name  = "DB_PASS"
-        value = google_sql_user.wiki_user.password
-      }
-      
-      env {
-        name  = "DB_NAME"
-        value = google_sql_database.wiki_database.name
-      }
-      
-      # Resource configuration
-      resources {
-        limits = {
-          cpu    = "1000m"
-          memory = "512Mi"
-        }
-        cpu_idle          = true
-        startup_cpu_boost = false
-      }
-      
-      # Health check
-      startup_probe {
-        http_get {
-          path = "/"
-          port = 3000
-        }
-        initial_delay_seconds = 30
-        timeout_seconds      = 10
-        period_seconds       = 10
-        failure_threshold    = 3
-      }
-      
-      liveness_probe {
-        http_get {
-          path = "/"
-          port = 3000
-        }
-        initial_delay_seconds = 60
-        timeout_seconds      = 5
-        period_seconds       = 30
-        failure_threshold    = 3
-      }
-    }
-    
-    # Scaling configuration
-    scaling {
-      min_instance_count = 0
-      max_instance_count = 10
-    }
-    
-    # Execution environment
-    execution_environment = "EXECUTION_ENVIRONMENT_GEN2"
-    
-    # Timeout
-    timeout = "300s"
-  }
-  
-  # Traffic configuration
-  traffic {
-    type    = "TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST"
-    percent = 100
-  }
-  
-  depends_on = [
-    terraform_data.build_and_push_image,
-    google_sql_database.wiki_database,
-    google_sql_user.wiki_user,
-    google_project_iam_member.wiki_js_sa_permissions
-  ]
-}
-
-# Allow public access to Cloud Run service
-resource "google_cloud_run_service_iam_member" "public_access" {
-  service  = google_cloud_run_v2_service.wiki_js.name
-  location = google_cloud_run_v2_service.wiki_js.location
-  role     = "roles/run.invoker"
-  member   = "allUsers"
-}
-
-# =============================================================================
-# OUTPUTS
-# =============================================================================
-
-output "deployment_summary" {
-  description = "🎉 Deployment Summary"
-  value = {
-    "✅ Status"                = "Wiki.js deployment completed successfully!"
-    "🌐 Wiki.js URL"          = google_cloud_run_v2_service.wiki_js.uri
-    "🗄️  Database"            = "${google_sql_database_instance.wiki_postgres.name} (${google_sql_database_instance.wiki_postgres.public_ip_address})"
-    "📦 Image Registry"       = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.wiki_js_repo.repository_id}"
-    "🔑 Service Account"      = google_service_account.wiki_js_sa.email
-    "🏗️  Build Method"        = "Cloud Build via terraform_data"
-  }
-}
-
-output "wiki_js_url" {
-  description = "🌐 Your Wiki.js Application URL"
-  value       = google_cloud_run_v2_service.wiki_js.uri
-}
-
-output "next_steps" {
-  description = "📋 What to do next"
-  value = <<-EOT
-    
-    🎉 DEPLOYMENT COMPLETED SUCCESSFULLY!
-    
-    📝 Next Steps:
-    1. Visit your Wiki.js URL: ${google_cloud_run_v2_service.wiki_js.uri}
-    2. Complete the initial setup wizard
-    3. Create your admin account
-    4. Start building your wiki!
-    
-    🔧 Management URLs:
-    - Cloud Run: https://console.cloud.google.com/run/detail/${var.region}/wiki-js/metrics?project=${var.project_id}
-    - Cloud SQL: https://console.cloud.google.com/sql/instances/wiki-postgres-instance/overview?project=${var.project_id}
-    - Artifact Registry: https://console.cloud.google.com/artifacts/docker/${var.project_id}/${var.region}/wiki-js?project=${var.project_id}
-    
-    💡 Tips:
-    - Database connection is pre-configured
-    - Your wiki is publicly accessible
-    - Logs are available in Cloud Run console
-    
-    🚀 Happy wiki-ing!
-  EOT
-}
-
-# Database connection string (sensitive)
-output "database_connection" {
-  description = "Database connection details"
-  sensitive   = true
-  value = {
-    host     = google_sql_database_instance.wiki_postgres.public_ip_address
-    database = google_sql_database.wiki_database.name
-    username = google_sql_user.wiki_user.name
-    password = google_sql_user.wiki_user.password
-    port     = 5432
-  }
-} | head -1)
-      
-      if [ -z "$BUILD_ID" ]; then
-        echo "❌ Failed to get build ID. Build output:"
-        echo "$BUILD_OUTPUT"
-        exit 1
-      fi
-      
-      echo "🔨 Build submitted with ID: $BUILD_ID"
-      echo "⏳ Waiting for build to complete..."
-      
-      # Wait for build to complete and stream logs
-      if ! gcloud builds log "$BUILD_ID" --stream --project=${var.project_id}; then
-        echo "⚠️ Failed to stream logs, but build may still be running..."
-      fi
-      
-      # Wait a bit and check final status
-      sleep 30
-      BUILD_STATUS=$(gcloud builds describe "$BUILD_ID" --project=${var.project_id} --format="value(status)" 2>/dev/null || echo "UNKNOWN")
-      
-      # Wait for completion if still running
-      WAIT_COUNT=0
-      while [ "$BUILD_STATUS" = "WORKING" ] && [ $WAIT_COUNT -lt 20 ]; do
-        echo "⏳ Build still running... (check $((WAIT_COUNT + 1))/20)"
-        sleep 30
-        BUILD_STATUS=$(gcloud builds describe "$BUILD_ID" --project=${var.project_id} --format="value(status)" 2>/dev/null || echo "UNKNOWN")
-        WAIT_COUNT=$((WAIT_COUNT + 1))
-      done
-      
-      if [ "$BUILD_STATUS" = "SUCCESS" ]; then
-        echo "✅ Wiki.js image successfully built and pushed to Artifact Registry!"
-      else
-        echo "❌ Build failed or timed out with status: $BUILD_STATUS"
-        echo "Check build details: https://console.cloud.google.com/cloud-build/builds/$BUILD_ID?project=${var.project_id}"
-        exit 1
-      fi
-      
-      # Clean up temporary file
-      rm -f /tmp/cloudbuild.yaml
+      echo "✅ Wiki.js image successfully pushed to Artifact Registry!"
     EOT
   }
   
   depends_on = [
     google_artifact_registry_repository.wiki_js_repo,
-    google_artifact_registry_repository_iam_member.cloudbuild_sa_registry,
-    google_project_iam_member.cloudbuild_sa_permissions
+    google_artifact_registry_repository_iam_member.cloudbuild_sa_registry
   ]
 }
 
@@ -644,7 +396,7 @@ resource "google_cloud_run_v2_service" "wiki_js" {
   }
   
   depends_on = [
-    terraform_data.build_and_push_image,
+    null_resource.build_and_push_image,
     google_sql_database.wiki_database,
     google_sql_user.wiki_user,
     google_project_iam_member.wiki_js_sa_permissions
@@ -671,7 +423,7 @@ output "deployment_summary" {
     "🗄️  Database"            = "${google_sql_database_instance.wiki_postgres.name} (${google_sql_database_instance.wiki_postgres.public_ip_address})"
     "📦 Image Registry"       = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.wiki_js_repo.repository_id}"
     "🔑 Service Account"      = google_service_account.wiki_js_sa.email
-    "🏗️  Build Method"        = "Cloud Build via terraform_data"
+    "🏗️  Build Method"        = "Docker pull and push via null_resource"
   }
 }
 
