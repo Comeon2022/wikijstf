@@ -256,109 +256,90 @@ resource "google_sql_user" "wiki_user" {
 # STEP 6: CLOUD BUILD FOR DOCKER IMAGE
 # =============================================================================
 
-# Create a simple build configuration for pulling and pushing Wiki.js image
-resource "google_cloudbuild_trigger" "wiki_js_image_builder" {
-  name        = "wiki-js-image-builder"
-  description = "Pulls official Wiki.js image and pushes to Artifact Registry"
-  location    = var.region
-  
-  # Manual trigger - we'll execute it via terraform
-  manual_trigger {}
-  
-  build {
-    # Pull official Wiki.js image
-    step {
-      name = "gcr.io/cloud-builders/docker"
-      args = [
-        "pull",
-        "ghcr.io/requarks/wiki:2"
-      ]
-    }
-    
-    # Tag for our Artifact Registry
-    step {
-      name = "gcr.io/cloud-builders/docker"
-      args = [
-        "tag",
-        "ghcr.io/requarks/wiki:2",
-        "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.wiki_js_repo.repository_id}/wiki:2"
-      ]
-    }
-    
-    # Tag as latest
-    step {
-      name = "gcr.io/cloud-builders/docker"
-      args = [
-        "tag",
-        "ghcr.io/requarks/wiki:2",
-        "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.wiki_js_repo.repository_id}/wiki:latest"
-      ]
-    }
-    
-    # Push tagged image
-    step {
-      name = "gcr.io/cloud-builders/docker"
-      args = [
-        "push",
-        "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.wiki_js_repo.repository_id}/wiki:2"
-      ]
-    }
-    
-    # Push latest image
-    step {
-      name = "gcr.io/cloud-builders/docker"
-      args = [
-        "push",
-        "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.wiki_js_repo.repository_id}/wiki:latest"
-      ]
-    }
-    
-    options {
-      logging = "CLOUD_LOGGING_ONLY"
-      machine_type = "E2_STANDARD_2"
-    }
-    
-    timeout = "600s"
-  }
-  
-  service_account = google_service_account.cloudbuild_sa.id
-  
-  depends_on = [
-    google_artifact_registry_repository_iam_member.cloudbuild_sa_registry,
-    google_project_iam_member.cloudbuild_sa_permissions
-  ]
-}
+# =============================================================================
+# STEP 6: BUILD AND PUSH DOCKER IMAGE USING CLOUD BUILD
+# =============================================================================
 
-# Execute the Cloud Build to create and push the image
-resource "terraform_data" "trigger_image_build" {
+# Execute Cloud Build to pull and push Wiki.js image
+resource "terraform_data" "build_and_push_image" {
   triggers_replace = [
-    google_cloudbuild_trigger.wiki_js_image_builder.trigger_id
+    google_artifact_registry_repository.wiki_js_repo.name
   ]
   
   provisioner "local-exec" {
     command = <<-EOT
-      echo "🚀 Starting Wiki.js image build process..."
+      echo "🚀 Starting Wiki.js image build and push process..."
       
-      # Wait a moment for trigger to be fully ready
-      sleep 10
+      # Create a temporary build configuration
+      cat > /tmp/cloudbuild.yaml << 'EOF'
+steps:
+  # Pull the official Wiki.js image
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['pull', 'ghcr.io/requarks/wiki:2']
+    
+  # Tag for Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: 
+      - 'tag'
+      - 'ghcr.io/requarks/wiki:2'
+      - '${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.wiki_js_repo.repository_id}/wiki:2'
       
-      # Trigger the build
-      BUILD_ID=$(gcloud builds triggers run wiki-js-image-builder \
+  # Tag as latest
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'tag' 
+      - 'ghcr.io/requarks/wiki:2'
+      - '${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.wiki_js_repo.repository_id}/wiki:latest'
+      
+  # Push version 2
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', '${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.wiki_js_repo.repository_id}/wiki:2']
+    
+  # Push latest
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', '${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.wiki_js_repo.repository_id}/wiki:latest']
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: 'E2_STANDARD_2'
+timeout: '600s'
+serviceAccount: '${google_service_account.cloudbuild_sa.email}'
+EOF
+      
+      echo "📦 Submitting build job to Cloud Build..."
+      
+      # Submit the build
+      BUILD_ID=$(gcloud builds submit --config=/tmp/cloudbuild.yaml \
+        --no-source \
         --project=${var.project_id} \
-        --region=${var.region} \
-        --format="value(metadata.build.id)")
+        --format="value(id)")
       
-      echo "📦 Build started with ID: $BUILD_ID"
+      echo "🔨 Build submitted with ID: $BUILD_ID"
       echo "⏳ Waiting for build to complete..."
       
-      # Wait for build to complete
+      # Wait for build to complete and stream logs
       gcloud builds log $BUILD_ID --stream --project=${var.project_id}
       
-      echo "✅ Wiki.js image build completed!"
+      # Check if build succeeded
+      BUILD_STATUS=$(gcloud builds describe $BUILD_ID --project=${var.project_id} --format="value(status)")
+      
+      if [ "$BUILD_STATUS" = "SUCCESS" ]; then
+        echo "✅ Wiki.js image successfully built and pushed to Artifact Registry!"
+      else
+        echo "❌ Build failed with status: $BUILD_STATUS"
+        exit 1
+      fi
+      
+      # Clean up temporary file
+      rm -f /tmp/cloudbuild.yaml
     EOT
   }
   
-  depends_on = [google_cloudbuild_trigger.wiki_js_image_builder]
+  depends_on = [
+    google_artifact_registry_repository.wiki_js_repo,
+    google_artifact_registry_repository_iam_member.cloudbuild_sa_registry,
+    google_project_iam_member.cloudbuild_sa_permissions
+  ]
 }
 
 # =============================================================================
@@ -464,7 +445,7 @@ resource "google_cloud_run_v2_service" "wiki_js" {
   }
   
   depends_on = [
-    terraform_data.trigger_image_build,
+    terraform_data.build_and_push_image,
     google_sql_database.wiki_database,
     google_sql_user.wiki_user,
     google_project_iam_member.wiki_js_sa_permissions
